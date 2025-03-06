@@ -53,6 +53,11 @@ partial_percentage
 # NAs per column
 colSums(is.na(data_raw)) 
 
+# Visualize missing data pattern
+missing_pattern <- aggr(data_raw, col = c("navyblue", "red"), numbers = TRUE, 
+                        sortVars = TRUE, labels = names(data_raw), 
+                        cex.axis = 0.7, gap = 3, ylab = "Missing Data Pattern")
+
 # Frequency of each response in each variable
 for (col in names(data_raw)) {
   cat("\nFrequencies for column:", col, "\n")
