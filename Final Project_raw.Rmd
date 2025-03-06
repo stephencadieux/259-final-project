@@ -1,0 +1,1111 @@
+---
+title: "Final Project"
+author: "Stephen Cadieux"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(tidyverse)
+library(e1071)
+library(tidyr)
+library(psych)
+library(dplyr)
+library(GPArotation)
+library(broom)
+library(glmnet)
+library(car)
+library(VIM)
+library(DMwR2)
+library(caret)
+library(parallel)
+library(mice)
+```
+
+```{r, Chunk 1, fig.cap="Get to know the data"}
+# This code won't run because I am not storing the data in this directory. However, it runs in its "real" wd.
+
+# Read in raw data set
+data_raw <- read.csv('../data/gfs_all_countries_wave1.csv') 
+
+# Basic structure and summary
+str(data_raw) 
+ncol(data_raw) 
+nrow(data_raw) 
+summary(data_raw) 
+
+# Full vs Partial responses due to survey error
+frequencies <- data_raw %>%
+  filter(FULL_PARTIAL %in% c(1, 2)) %>%
+  group_by(FULL_PARTIAL) %>%
+  summarise(count = n())
+full_responses <- frequencies %>%
+  filter(FULL_PARTIAL == 1) %>%
+  pull(count)
+partial_responses <- frequencies %>%
+  filter(FULL_PARTIAL == 2) %>%
+  pull(count)
+partial_percentage <- (partial_responses / full_responses) * 100
+partial_responses
+partial_percentage
+
+# NAs per column
+colSums(is.na(data_raw)) 
+
+# Frequency of each response in each variable
+for (col in names(data_raw)) {
+  cat("\nFrequencies for column:", col, "\n")
+  frequency_table <- data_raw %>%
+    group_by(!!sym(col)) %>%
+    summarise(Frequency = n()) %>%
+    arrange(desc(Frequency))
+  print(frequency_table)
+}
+
+# The sum per column of "saw/skipped", "DK", "refused"
+count_specific_missing <- function(x) { 
+  sum(x %in% c(-98, -998, -9998, 9995, 98, 998, 9998, 99, 999, 9999))
+}
+missing_counts <- apply(data_raw, 2, count_specific_missing)
+print(missing_counts)
+
+# Total number of "saw/skipped", "DK", "refused"
+count_missing <- function(x) {
+  sum(x %in% c(-98, -998, -9998, 9995, 98, 998, 9998, 99, 999, 9999)) 
+}
+total_missing <- sum(apply(data_raw, 2, count_missing))
+total_entries <- nrow(data_raw) * ncol(data_raw)
+percentage_missing <- (total_missing / total_entries) * 100
+cat("Total percentage of saw/skipped, DK, refused:", percentage_missing, "%\n")
+
+# Percentage of missing data in each variable, excluding variables with skip logic and countries where it isn't asked
+
+# Define the columns to exclude
+excluded_columns <- c("ABUSED", "APPROVE_GOVT", "BORN_COUNTRY", "CNTRY_REL_BUD", 
+                      "CNTRY_REL_CHI", "CNTRY_REL_CHR", "CNTRY_REL_HIN", "CNTRY_REL_ISL", 
+                      "CNTRY_REL_JUD", "CNTRY_REL_SHI", "POLITICAL_ID", "REGION2", 
+                      "REGION3", "REL3", "REL4", "REL5", "REL6", "REL7", "REL9", 
+                      "SELFID1", "SELFID2", "TEACHINGS_1", "TEACHINGS_2", "TEACHINGS_3", 
+                      "TEACHINGS_4", "TEACHINGS_5", "TEACHINGS_6", "TEACHINGS_7", 
+                      "TEACHINGS_8", "TEACHINGS_9", "TEACHINGS_10", "TEACHINGS_11", 
+                      "TEACHINGS_12", "TEACHINGS_13", "TEACHINGS_14", "TEACHINGS_15")
+
+# Calculate the percentage of missing data for a single column
+missing_values <- c(-98, -998, -9998, 9995, 98, 998, 9998, 99, 999, 9999, NA)
+calculate_missing_percentage <- function(column) {
+  total_values <- length(column)
+  missing_count <- sum(column %in% missing_values, na.rm = TRUE)
+  missing_percentage <- (missing_count / total_values) * 100
+  return(missing_percentage)
+}
+
+# Exclude the specified columns
+data_filtered <- data_raw[, !names(data_raw) %in% excluded_columns]
+
+# Apply to each column
+missing_percentages <- sapply(data_filtered, calculate_missing_percentage)
+
+# Data frame to display the results
+missing_percentages_df <- data.frame(
+  Variable = names(missing_percentages),
+  Missing_Percentage = missing_percentages
+)
+print(missing_percentages_df)
+
+# Missing data descriptives
+
+# Calculate missing data count per respondent
+missing_count <- data_filtered %>% 
+  mutate(across(everything(), ~ ifelse(. %in% missing_values, 1, 0))) %>% 
+  rowSums(na.rm = TRUE)
+
+# Descriptive statistics for missing data
+missing_stats <- summary(missing_count)
+missing_stats
+
+# Proportion of participants with complete data vs. at least one missing cell
+complete_data_count <- sum(missing_count == 0)
+at_least_one_missing_count <- sum(missing_count > 0)
+total_participants <- nrow(data_filtered)
+complete_data_proportion <- complete_data_count / total_participants
+at_least_one_missing_proportion <- at_least_one_missing_count / total_participants
+
+proportion_df <- data.frame(
+  Category = c("Complete Data", "At Least One Missing Cell"),
+  Count = c(complete_data_count, at_least_one_missing_count),
+  Proportion = c(complete_data_proportion, at_least_one_missing_proportion)
+)
+print(proportion_df)
+
+# Total number of missing cells 
+
+# Function to identify if a value is missing
+is_missing <- function(x) {
+  is.na(x) | x %in% missing_values
+}
+
+# Calculate total number of cells in the filtered dataset
+total_cells <- nrow(data_filtered) * ncol(data_filtered)
+
+# Calculate the number of missing cells
+missing_cells <- sum(apply(data_filtered, 2, function(column) sum(is_missing(column))))
+
+# Calculate the percentage of missing cells
+missing_percentage <- (missing_cells / total_cells) * 100
+
+# Create a data frame to display the results
+missing_summary_df <- data.frame(
+  Total_Cells = total_cells,
+  Missing_Cells = missing_cells,
+  Missing_Percentage = missing_percentage
+)
+
+print(missing_summary_df)
+
+```
+
+```{r, Chunk 2, fig.cap="Data Cleaning"}
+
+data_cleaned <- data_raw
+
+# List of variables to reverse score
+variables_to_reverse_1_4 <- c("CAPABLE", "CONNECTED_REL", "CONTROL_WORRY", 
+                              "DEPRESSED", "FEEL_ANXIOUS", "INTEREST", "PEACE", 
+                              "PRAY_MEDITATE", "SACRED_TEXTS", "SUFFERING", 
+                              "SVCS_12YRS", "BODILY_PAIN", "DISCRIMINATED", 
+                              "FATHER_RELATN", "FORGIVE", "INCOME_12YRS", 
+                              "LIFE_BALANCE", "MOTHER_RELATN", "SVCS_FATHER", 
+                              "SVCS_MOTHER", "THREAT_LIFE")
+
+variables_to_reverse_1_5 <- c("ATTEND_SVCS", "APPROVE_GOVT", "GROUP_NOT_REL", 
+                              "HEALTH_GROWUP", "INCOME_DIFF", "OBEY_LAW", 
+                              "TRUST_PEOPLE")
+
+variables_to_reverse_0_10 <- c("EXPENSES", "LONELY", "WORRY_SAFETY")
+
+traits_variables <- paste0("TRAITS", 1:10)
+
+# Values to exclude from reverse scoring
+excluded_values <- c(-98, -998, -9998, 9995, 95, 96, 97, 98, 998, 9998, 99, 999, 9999, NA)
+
+# Function to reverse the scale from 1-4 to 4-1
+reverse_scale_1_4 <- function(x) {
+  return(ifelse(x %in% excluded_values, x, 5 - x))
+}
+
+# Function to reverse the scale from 1-5 to 5-1
+reverse_scale_1_5 <- function(x) {
+  return(ifelse(x %in% excluded_values, x, 6 - x))
+}
+
+# Function to reverse the scale from 1-7 to 7-1
+reverse_scale_1_7 <- function(x) {
+  return(ifelse(x %in% excluded_values, x, 8 - x))
+}
+
+# Function to reverse the scale from 0-10 to 10-0
+reverse_scale_0_10 <- function(x) {
+  return(ifelse(x %in% excluded_values, x, 10 - x))
+}
+
+# Apply reverse scoring to the specified variables
+data_cleaned[variables_to_reverse_1_4] <- lapply(data_cleaned[variables_to_reverse_1_4], reverse_scale_1_4)
+data_cleaned[variables_to_reverse_1_5] <- lapply(data_cleaned[variables_to_reverse_1_5], reverse_scale_1_5)
+data_cleaned[variables_to_reverse_0_10] <- lapply(data_cleaned[variables_to_reverse_0_10], reverse_scale_0_10)
+data_cleaned[traits_variables] <- lapply(data_cleaned[traits_variables], reverse_scale_1_7)
+
+# Display frequencies to check against earlier frequencies 
+for (col in names(data_cleaned)) {
+  cat("\nFrequencies for column:", col, "\n")
+  frequency_table <- data_cleaned %>%
+    group_by(!!sym(col)) %>%
+    summarise(Frequency = n()) %>%
+    arrange(desc(Frequency))
+  print(frequency_table)
+}
+
+# Continuous variables
+variables_continuous <- c("AGE", "APPROVE_GOVT", "BELONGING", "CIGARETTES", "CNTRY_REL_BUD", "CNTRY_REL_CHI", "CNTRY_REL_CHR", "CNTRY_REL_HIN", "CNTRY_REL_ISL", "CNTRY_REL_JUD", "CNTRY_REL_SHI", "CONTENT", "DAYS_EXERCISE", "DRINKS", "EXPECT_GOOD", "EXPENSES", "FATHER_RELATN", "FREEDOM", "GIVE_UP", "GRATEFUL", "HAPPY", "HEALTH_GROWUP", "HOPE_FUTURE", "INCOME_DIFF", "LIFE_PURPOSE", "LIFE_SAT", "LONELY", "MENTAL_HEALTH", "MOTHER_RELATN", "NUM_CHILDREN", "NUM_HOUSEHOLD", "OBEY_LAW", "PEOPLE_HELP", "PHYSICAL_HLTH", "PROMOTE_GOOD", "SAT_RELATNSHP", "SHOW_LOVE", "SUFFERING", "TEACHINGS_1", "TEACHINGS_2", "TEACHINGS_3", "TEACHINGS_4", "TEACHINGS_5", "TEACHINGS_6", "TEACHINGS_7", "TEACHINGS_8", "TEACHINGS_9", "TEACHINGS_10", "TEACHINGS_11", "TEACHINGS_12", "TEACHINGS_13", "TEACHINGS_14", "TEACHINGS_15", "THREAT_LIFE", "TRAITS1", "TRAITS2", "TRAITS3", "TRAITS4", "TRAITS5", "TRAITS6", "TRAITS7", "TRAITS8", "TRAITS9", "TRAITS10", "WB_FIVEYRS", "WB_TODAY", "WORRY_SAFETY", "WORTHWHILE")
+
+# Categorical variables
+variables_categorical <- c("ABUSED", "AFTER_DEATH", "ATTEND_SVCS", "BELIEVE_GOD", "BODILY_PAIN", "BORN_COUNTRY", "CAPABLE", "CLOSE_TO", "COMFORT_REL", "CONNECTED_REL", "CONTROL_WORRY", "COVID_DEATH", "CRITICAL", "DEPRESSED", "DISCRIMINATED", "DONATED", "EDUCATION", "EDUCATION_3", "EMPLOYMENT", "FATHER_LOVED", "FEEL_ANXIOUS", "FORGIVE", "GENDER", "GOD_PUNISH", "GROUP_NOT_REL", "HEALTH_PROB", "HELP_STRANGER", "INCOME", "INCOME_12YRS", "INTEREST", "LIFE_APPROACH", "LIFE_BALANCE", "LOVED_BY_GOD", "MARITAL_STATUS", "MOTHER_LOVED", "OUTSIDER", "OWN_RENT_HOME", "PARENTS_12YRS", "PEACE", "POLITICAL_ID", "PRAY_MEDITATE", "REGION", "REGION2", "REGION3", "REL1", "REL2", "REL3", "REL4", "REL5", "REL6", "REL7", "REL8", "REL9", "REL_EXPERINC", "REL_IMPORTANT", "SACRED_TEXTS", "SAT_LIVE", "SAY_IN_GOVT", "SELFID1", "SELFID2", "SVCS_12YRS", "SVCS_FATHER", "SVCS_MOTHER", "TELL_BELIEFS", "TRUST_PEOPLE", "URBAN_RURAL", "VOLUNTEERED")
+
+# System variables to exclude from imputation
+variables_system <- c("COUNTRY", "ID", "WAVE", "MODE_RECRUIT", "MODE_ANNUAL", "RECRUIT_TYPE", "DOI_RECRUIT", "DOI_ANNUAL", "ANNUAL_WEIGHT1", "STRATA", "PSU", "FULL_PARTIAL")
+
+# Check for skew
+
+# ID the vars I want to check (only predictors of interest to the researcher)
+data_forskew <- data_cleaned %>%
+  dplyr::select(c("ATTEND_SVCS", "BELONGING", "CAPABLE", "CONNECTED_REL", "CONTENT", 
+           "CONTROL_WORRY", "DEPRESSED", "FEEL_ANXIOUS", "FREEDOM", "GRATEFUL", 
+           "HAPPY", "HOPE_FUTURE", "INTEREST", "LIFE_PURPOSE", "LIFE_SAT", 
+           "LONELY", "MENTAL_HEALTH", "PEACE", "PEOPLE_HELP", "PHYSICAL_HLTH", 
+           "PRAY_MEDITATE", "SACRED_TEXTS", "SUFFERING", "SVCS_12YRS", 
+           "TEACHINGS_1", "TEACHINGS_2", "TEACHINGS_3", "TEACHINGS_4", 
+           "TEACHINGS_5", "TEACHINGS_6", "TEACHINGS_7", "TEACHINGS_8", 
+           "TEACHINGS_9", "TEACHINGS_10", "TEACHINGS_11", "TEACHINGS_12", 
+           "TEACHINGS_13", "TEACHINGS_14", "TEACHINGS_15", "TRAITS1", "TRAITS2", 
+           "TRAITS3", "TRAITS4", "TRAITS5", "TRAITS6", "TRAITS7", "TRAITS8", 
+           "TRAITS9", "TRAITS10", "WB_TODAY", "WORTHWHILE"))
+   
+# Check Visually 
+data_forskew <- data_forskew %>% 
+  mutate(across(everything(), ~replace(., . %in% c(-98, 99), NA))) # Replace -98, 99 with NA
+
+for (col in names(data_forskew)) {
+  if (all(is.na(data_forskew[[col]]))) next # Skip columns with all NAs
+  
+  # Determine if the variable is categorical or continuous based on unique values
+  unique_values <- sort(unique(na.omit(data_forskew[[col]])))
+  
+  if (length(unique_values) <= 10) {  # Treat as categorical if <= 10 unique values
+    p <- ggplot(data_forskew, aes(x = factor(.data[[col]]))) +  # Use factor to treat as categorical
+      geom_bar(fill = "#003DA5", color = "black", alpha = 0.7, na.rm = TRUE) +
+      scale_x_discrete(drop = FALSE) +  # Ensure all categories appear on x-axis
+      theme_minimal() +
+      labs(title = paste("Distribution of", col), x = col, y = "Frequency")
+    
+  } else {  # Treat as continuous otherwise
+    var_range <- range(data_forskew[[col]], na.rm = TRUE) # Get the range of values for continuous variables
+    
+    # Set finer breaks for continuous variables
+    if (diff(var_range) <= 10) {
+      breaks <- seq(var_range[1], var_range[2], by = 1) # Fine breaks for small ranges
+      binwidth <- 0.5
+    } else if (diff(var_range) <= 50) {
+      breaks <- seq(var_range[1], var_range[2], by = 2) # Finer breaks for mid-sized ranges
+      binwidth <- 1
+    } else {
+      breaks <- seq(var_range[1], var_range[2], by = 5) # Coarser breaks for large ranges
+      binwidth <- 2
+    }
+    
+    # Plot histogram for continuous variables
+    p <- ggplot(data_forskew, aes(x = .data[[col]])) +
+      geom_histogram(binwidth = binwidth, fill = "#003DA5", color = "black", alpha = 0.7, na.rm = TRUE) +
+      scale_x_continuous(limits = var_range, breaks = breaks) +
+      theme_minimal() +
+      labs(title = paste("Distribution of", col), x = col, y = "Frequency")
+  }
+  
+  print(p)
+}
+
+# Check Quantitatively and print if less than -1 or greater than 1
+skewness_values <- apply(data_forskew, 2, function(x) skewness(na.omit(x)))
+cat("Skewed Variables", "\n")
+for (variable in names(skewness_values)) { 
+  skew_value <- skewness_values[variable]
+  if (skew_value < -1 || skew_value > 1) {
+    cat(variable, ":", skew_value, "\n")
+  }
+}
+
+```
+
+```{r, Chunk 3, fig.cap="MICE"}
+
+# Define custom missing value indicators
+custom_missing_values <- c(-98, -998, -9998, 9995, 98, 998, 9998, 99, 999, 9999)
+
+# Convert custom missing values to NA
+data_cleaned <- data_cleaned %>% mutate_all(~replace(., . %in% custom_missing_values, NA))
+
+# Combine excluded_columns and variables_system into a new list
+all_excluded_columns <- c(excluded_columns, variables_system)
+
+# Separate the excluded columns from the dataset
+data_to_impute <- data_cleaned %>% select(-all_of(all_excluded_columns))
+excluded_data <- data_cleaned %>% select(all_of(all_excluded_columns))
+
+# Perform MICE imputation on the remaining columns
+mice_imputed <- mice(data_to_impute, m = 10, method = "rf", seed = 123)
+
+# Create a list to store the imputed datasets with excluded columns added back
+imputed_datasets_complete <- list()
+
+# Add excluded columns back to each imputed dataset
+for (i in 1:mice_imputed$m) {
+  imputed_data <- complete(mice_imputed, i)  # Get the i-th imputed dataset
+  imputed_data_with_excluded <- cbind(imputed_data, excluded_data)  # Combine with excluded columns
+  imputed_datasets_complete[[i]] <- imputed_data_with_excluded  # Store in the list
+}
+
+# Combine all imputed datasets into a single long dataset for checking NAs
+combined_data <- do.call(rbind, imputed_datasets_complete)
+
+# If you want to keep track of which imputation each row came from, you can add an identifier column:
+for (i in 1:length(imputed_datasets_complete)) {
+  imputed_datasets_complete[[i]]$imputation_number <- i
+}
+combined_data <- do.call(rbind, imputed_datasets_complete)
+
+# Function to print frequencies for each column in the combined dataset
+print_frequencies_combined <- function(data) {
+  for (col in names(data)) {
+    cat("\nFrequencies for column:", col, "\n")
+    frequency_table <- data %>%
+      group_by(!!sym(col)) %>%
+      summarise(Frequency = n()) %>%
+      arrange(desc(Frequency))
+    print(frequency_table)
+  }
+}
+print_frequencies_combined(combined_data)
+
+# AFter checks are complete, save the imputed datasets, with columns added back
+for (i in 1:mice_imputed$m) {
+  # Combine the imputed data with the excluded columns
+  imputed_data <- imputed_datasets_complete[[i]]
+  
+  # Save the dataset as a CSV file in the specified directory
+  write.csv(imputed_data, paste0("../data/imputed_dataset_", i, ".csv"), row.names = FALSE)
+}
+
+```
+
+```{r, Chunk 4, fig.cap="Data Cleaning"}
+
+# Read in imputed data sets
+imputed_dataset_1 <- read.csv('../data/imputed_dataset_1.csv')
+imputed_dataset_2 <- read.csv('../data/imputed_dataset_2.csv')
+imputed_dataset_3 <- read.csv('../data/imputed_dataset_3.csv')
+imputed_dataset_4 <- read.csv('../data/imputed_dataset_4.csv')
+imputed_dataset_5 <- read.csv('../data/imputed_dataset_5.csv')
+imputed_dataset_6 <- read.csv('../data/imputed_dataset_6.csv')
+imputed_dataset_7 <- read.csv('../data/imputed_dataset_7.csv')
+imputed_dataset_8 <- read.csv('../data/imputed_dataset_8.csv')
+imputed_dataset_9 <- read.csv('../data/imputed_dataset_9.csv')
+imputed_dataset_10 <- read.csv('../data/imputed_dataset_10.csv')
+
+# List of imputed datasets
+imputed_datasets <- list(imputed_dataset_1, imputed_dataset_2, imputed_dataset_3, 
+                         imputed_dataset_4, imputed_dataset_5, imputed_dataset_6,
+                         imputed_dataset_7, imputed_dataset_8, imputed_dataset_9, 
+                         imputed_dataset_10)
+
+# Basic structure and summary of dataset 1
+str(imputed_dataset_1) 
+ncol(imputed_dataset_1) 
+nrow(imputed_dataset_1) 
+summary(imputed_dataset_1) 
+
+# NAs per column in dataset 1
+colSums(is.na(imputed_dataset_1)) 
+
+# Create composites
+
+# Data Cleaning
+imputed_datasets <- lapply(imputed_datasets, function(data) {
+  
+  # Recode REL_EXPERIENC to binary 0/1 where 1 = Yes and 0 = No
+  data <- data %>%
+    mutate(REL_EXPERIENC = ifelse(REL_EXPERIENC == 1, 1, 0))
+  
+  # Recode REL_IMPORTANT to binary 0/1 where 1 = Yes and 0 = No
+  data <- data %>%
+    mutate(REL_IMPORTANT = ifelse(REL_IMPORTANT == 1, 1, 0))
+  
+  # Reverse score negative affect components for composites
+  data <- data %>%
+    mutate(
+      SUFFERING = 5 - SUFFERING,
+      INTEREST = 5 - INTEREST,
+      DEPRESSED = 5 - DEPRESSED,
+      FEEL_ANXIOUS = 5 - FEEL_ANXIOUS,
+      CONTROL_WORRY = 5 - CONTROL_WORRY
+    )
+  return(data)
+})
+
+
+# Standardize and create outcome composites
+imputed_datasets <- lapply(imputed_datasets, function(data) {
+  data <- data %>%
+    mutate(
+      HAPPY_z = (HAPPY - mean(HAPPY, na.rm = TRUE)) / sd(HAPPY, na.rm = TRUE),
+      PEACE_z = (PEACE - mean(PEACE, na.rm = TRUE)) / sd(PEACE, na.rm = TRUE),
+      SUFFERING_z = (SUFFERING - mean(SUFFERING, na.rm = TRUE)) / sd(SUFFERING, na.rm = TRUE),
+      INTEREST_z = (INTEREST - mean(INTEREST, na.rm = TRUE)) / sd(INTEREST, na.rm = TRUE),
+      DEPRESSED_z = (DEPRESSED - mean(DEPRESSED, na.rm = TRUE)) / sd(DEPRESSED, na.rm = TRUE),
+      FEEL_ANXIOUS_z = (FEEL_ANXIOUS - mean(FEEL_ANXIOUS, na.rm = TRUE)) / sd(FEEL_ANXIOUS, na.rm = TRUE),
+      CONTROL_WORRY_z = (CONTROL_WORRY - mean(CONTROL_WORRY, na.rm = TRUE)) / sd(CONTROL_WORRY, na.rm = TRUE),
+      WB_TODAY_z = (WB_TODAY - mean(WB_TODAY, na.rm = TRUE)) / sd(WB_TODAY, na.rm = TRUE),
+      LIFE_SAT_z = (LIFE_SAT - mean(LIFE_SAT, na.rm = TRUE)) / sd(LIFE_SAT, na.rm = TRUE),
+      WORTHWHILE_z = (WORTHWHILE - mean(WORTHWHILE, na.rm = TRUE)) / sd(WORTHWHILE, na.rm = TRUE)
+    ) %>%
+    mutate(
+      PosA = (HAPPY_z + PEACE_z) / 2,
+      NegA = (SUFFERING_z + INTEREST_z + DEPRESSED_z + FEEL_ANXIOUS_z + CONTROL_WORRY_z) / 5,
+      LS = (WB_TODAY_z + LIFE_SAT_z + WORTHWHILE_z) / 3,
+      SWB = (PosA + NegA + LS) / 3
+    )
+  return(data)
+})
+
+# Equally weighted composites
+imputed_datasets <- lapply(imputed_datasets, function(data) {
+  data <- data %>%
+    mutate(
+      SWB_avg = (
+        HAPPY_z + PEACE_z + SUFFERING_z + INTEREST_z + DEPRESSED_z + 
+        FEEL_ANXIOUS_z + CONTROL_WORRY_z + WB_TODAY_z + LIFE_SAT_z + WORTHWHILE_z
+      ) / 10
+    )
+  return(data)
+})
+
+# Dichotomize demographics
+imputed_datasets <- lapply(imputed_datasets, function(data) {
+  data <- data %>%
+    mutate(
+      WEIRD = case_when(
+        COUNTRY %in% c(3, 4, 6, 7, 9, 10, 11, 12, 13, 16, 18, 19, 24) ~ 0,
+        COUNTRY %in% c(1, 2, 5, 8, 14, 17, 20, 22, 23) ~ 1,
+        TRUE ~ NA_real_  # for handling any other values in COUNTRY that are not specified
+      )
+    ) %>%
+    mutate(
+      ABRAHAMIC = case_when(
+        REL2 %in% c(3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15) ~ 0,
+        REL2 %in% c(1, 2, 5) ~ 1,
+        TRUE ~ NA_real_  # for handling any other values in REL2 that are not specified
+      )
+    )
+  return(data)
+})
+
+# Assign the modified datasets back to the original variable names if needed
+for (i in 1:10) {
+  assign(paste0("imputed_dataset_", i), imputed_datasets[[i]])
+}
+
+# Function to combine TEACHINGS variables and ensure no overlap
+combine_teachings <- function(data) {
+  # Define the column names manually
+  teachings_vars <- paste0("TEACHINGS_", 1:15)
+  
+  # Select the TEACHINGS columns without using all_of()
+  teachings_data <- data[teachings_vars]
+  
+  # Ensure no overlap - print rows where there might be overlap
+  overlaps <- teachings_data %>%
+    rowwise() %>%
+    mutate(overlap_count = sum(!is.na(c_across(everything())))) %>%
+    filter(overlap_count > 1)
+  
+  if (nrow(overlaps) > 0) {
+    print("Overlap detected in the following rows:")
+    print(overlaps)
+  } else {
+    print("No overlap detected. Proceeding with combination.")
+  }
+  
+  # Combine TEACHINGS_* into one TEACHINGS variable using coalesce
+  data$TEACHINGS <- apply(teachings_data, 1, function(x) {
+    # Return the first non-NA value
+    first_non_na <- x[!is.na(x)][1]
+    return(first_non_na)
+  })
+  
+  return(data)
+}
+
+# Apply the function to your imputed datasets
+imputed_datasets <- lapply(imputed_datasets, combine_teachings)
+```
+
+```{r, Chunk 5, fig.cap="Correlation"}
+
+# Matrix of Pearson correlation coefficients among the predictors 
+# Function to extract and prepare predictors for correlation analysis
+extract_predictors <- function(data) {
+  # Define variable categories
+  binary_categorical <- c("REL_EXPERIENC", "REL_IMPORTANT")
+  unordered_categorical <- c("BELIEVE_GOD", "COMFORT_REL", "CRITICAL", "GOD_PUNISH", 
+                             "LIFE_APPROACH", "LOVED_BY_GOD", "REL1", "REL2", "REL8", 
+                             "TELL_BELIEFS")
+  ordered_categorical <- c("AFTER_DEATH", "ATTEND_SVCS", "CONNECTED_REL", 
+                           "PRAY_MEDITATE", "SACRED_TEXTS", "SVCS_12YRS")
+  
+  # Select the predictors
+  predictors <- data %>%
+    dplyr::select(dplyr::all_of(c(binary_categorical, unordered_categorical, ordered_categorical, continuous)))
+  
+  # Convert binary categorical variables to numeric (if not already)
+  predictors <- predictors %>%
+    dplyr::mutate(across(dplyr::all_of(binary_categorical), ~ as.numeric(.)))
+
+  # One-hot encode unordered categorical variables
+  for (var in unordered_categorical) {
+    one_hot_encoded <- model.matrix(~ . - 1, data = predictors[var])  # Remove intercept and get binary columns
+    colnames(one_hot_encoded) <- paste(var, levels(data[[var]]), sep = "_")  # Name the columns with variable and level
+    predictors <- cbind(predictors, one_hot_encoded)
+    predictors[[var]] <- NULL  # Remove original unordered categorical column
+    
+    # Add a print statement to confirm this step is running
+    print(paste("One-hot encoding applied to:", var))
+  }
+
+  # Convert ordered categorical variables to numeric (ordinal encoding)
+  predictors <- predictors %>%
+    dplyr::mutate(across(dplyr::all_of(ordered_categorical), ~ as.numeric(.)))
+
+  # Ensure all columns are numeric
+  predictors <- predictors %>% dplyr::mutate(across(everything(), as.numeric))
+  
+  # Remove columns with zero variance
+  predictors <- predictors %>% dplyr::select_if(~ var(.) != 0)
+  
+  # Replace infinite values with NA
+  predictors <- predictors %>% dplyr::mutate(across(everything(), ~ ifelse(is.finite(.), ., NA)))
+  
+  # Standardize the predictors
+  predictors <- predictors %>% dplyr::mutate(across(everything(), scale))
+  
+  return(predictors)
+}
+
+# After applying the extract_predictors function, print out the structure of the predictors
+predictors <- extract_predictors(imputed_datasets[[1]])  # Check the first imputed dataset
+str(predictors)  # Show the column names and confirm if one-hot encoding worked
+
+# List of predictors and outcome variables for the analysis
+predictors_and_outcomes <- c("PosA", "NegA", "LS", "AFTER_DEATH", "ATTEND_SVCS", "BELIEVE_GOD", 
+                             "COMFORT_REL", "CONNECTED_REL", "CRITICAL", "GOD_PUNISH", 
+                             "LIFE_APPROACH", "LOVED_BY_GOD", "PRAY_MEDITATE", "REL1", 
+                             "REL2", "REL8", "REL_EXPERIENC", "REL_IMPORTANT", "SACRED_TEXTS", 
+                             "SVCS_12YRS", "TELL_BELIEFS", "SWB")  
+
+# Function to calculate correlations for each outcome, ensuring that all columns are numeric
+calculate_correlations <- function(data, outcome_name) {
+  outcome <- data[[outcome_name]]
+  
+  # Ensure all columns are numeric before calculating correlation
+  data <- data %>% dplyr::mutate(across(everything(), as.numeric))
+  
+  # Calculate pairwise correlations with the outcome
+  sapply(data[,-which(names(data) == outcome_name)], function(x) 
+    cor(x, outcome, use = "pairwise.complete.obs"))
+}
+
+# Initialize lists to store the correlations across all imputed datasets
+correlations_PosA_list <- vector("list", length(imputed_datasets))
+correlations_NegA_list <- vector("list", length(imputed_datasets))
+correlations_LS_list <- vector("list", length(imputed_datasets))
+correlations_SWB_list <- vector("list", length(imputed_datasets))  # For SWB
+
+# Loop through each of the imputed datasets
+for (i in 1:length(imputed_datasets)) {
+  # Select the necessary columns including the predictors and the composite elements
+  data_cor1 <- imputed_datasets[[i]] %>%
+    dplyr::select(dplyr::all_of(predictors_and_outcomes))
+  
+  # Ensure all variables are numeric
+  data_cor1 <- data_cor1 %>% dplyr::mutate(across(everything(), as.numeric))
+  
+  # Calculate correlations for each element and store in the lists
+  correlations_PosA_list[[i]] <- calculate_correlations(data_cor1, "PosA")
+  correlations_NegA_list[[i]] <- calculate_correlations(data_cor1, "NegA")
+  correlations_LS_list[[i]] <- calculate_correlations(data_cor1, "LS")
+  correlations_SWB_list[[i]] <- calculate_correlations(data_cor1, "SWB")  # For SWB
+}
+
+# Pool the correlations by averaging across all imputed datasets
+correlations_PosA <- Reduce("+", correlations_PosA_list) / length(imputed_datasets)
+correlations_NegA <- Reduce("+", correlations_NegA_list) / length(imputed_datasets)
+correlations_LS <- Reduce("+", correlations_LS_list) / length(imputed_datasets)
+correlations_SWB <- Reduce("+", correlations_SWB_list) / length(imputed_datasets)  # For SWB
+
+# Combine the results into a single data frame (including SWB correlations)
+correlation_df <- data.frame(
+  Predictor = names(correlations_PosA),
+  Correlation_with_PosA = correlations_PosA,
+  Correlation_with_NegA = correlations_NegA,
+  Correlation_with_LS = correlations_LS,
+  Correlation_with_SWB = correlations_SWB  # Add SWB correlations
+)
+
+# Add a column for the absolute values of the correlations
+correlation_df <- correlation_df %>%
+  dplyr::mutate(Absolute_Correlation_with_PosA = abs(Correlation_with_PosA),
+                Absolute_Correlation_with_NegA = abs(Correlation_with_NegA),
+                Absolute_Correlation_with_LS = abs(Correlation_with_LS),
+                Absolute_Correlation_with_SWB = abs(Correlation_with_SWB))  # Add SWB absolute values
+
+# Sort by the absolute value of the correlations with SWB first (or any other)
+sorted_correlation_df <- correlation_df %>%
+  dplyr::arrange(desc(Absolute_Correlation_with_SWB))  # Sorting by SWB, adjust as needed
+
+# Print the sorted data frame
+print(sorted_correlation_df)
+
+# Create a new data frame for SWB correlations only
+swb_correlation_df <- data.frame(
+  Predictor = names(correlations_SWB),
+  Correlation_with_SWB = correlations_SWB
+)
+
+# Sort by the absolute value of the correlations with SWB, keeping the negative signs
+swb_sorted_correlation_df <- swb_correlation_df %>%
+  dplyr::arrange(desc(abs(Correlation_with_SWB)))  # Sort by absolute value, but keep the signs
+
+# Print the sorted SWB correlation data frame
+print(swb_sorted_correlation_df)
+
+
+
+```
+
+```{r, Chunk 6, fig.cap="OLS Regression"}
+
+# Function to handle dummy coding for all categorical variables with releveling
+convert_to_dummy_variables <- function(data) {
+  data <- data %>%
+    # Convert to unordered factor (using as.character first) and set reference categories
+    mutate(AFTER_DEATH = relevel(as.factor(as.character(AFTER_DEATH)), ref = "2")) %>%
+    mutate(ATTEND_SVCS = relevel(as.factor(as.character(ATTEND_SVCS)), ref = "1")) %>%
+    mutate(CONNECTED_REL = relevel(as.factor(as.character(CONNECTED_REL)), ref = "1")) %>%
+    mutate(PRAY_MEDITATE = relevel(as.factor(as.character(PRAY_MEDITATE)), ref = "1")) %>%
+    mutate(SACRED_TEXTS = relevel(as.factor(as.character(SACRED_TEXTS)), ref = "1")) %>%
+    mutate(SVCS_12YRS = relevel(as.factor(as.character(SVCS_12YRS)), ref = "1")) %>%
+    mutate(CAPABLE = relevel(as.factor(as.character(CAPABLE)), ref = "1")) %>%
+    mutate(CLOSE_TO = relevel(as.factor(as.character(CLOSE_TO)), ref = "2")) %>%
+    # Unordered categorical variables:
+    mutate(BELIEVE_GOD = relevel(as.factor(BELIEVE_GOD), ref = "4")) %>%
+    mutate(COMFORT_REL = relevel(as.factor(COMFORT_REL), ref = "2")) %>%
+    mutate(CRITICAL = relevel(as.factor(CRITICAL), ref = "2")) %>%
+    mutate(GOD_PUNISH = relevel(as.factor(GOD_PUNISH), ref = "2")) %>%
+    mutate(LIFE_APPROACH = relevel(as.factor(LIFE_APPROACH), ref = "2")) %>%
+    mutate(LOVED_BY_GOD = relevel(as.factor(LOVED_BY_GOD), ref = "2")) %>%
+    mutate(REL1 = relevel(as.factor(REL1), ref = "97")) %>%
+    mutate(REL2 = relevel(as.factor(REL2), ref = "97")) %>%
+    mutate(REL8 = relevel(as.factor(REL8), ref = "4")) %>%
+    mutate(TELL_BELIEFS = relevel(as.factor(TELL_BELIEFS), ref = "2"))
+  
+  return(data)
+}
+
+# Function to apply best practices for different variable types, including setting reference categories for binary variables
+prepare_data <- function(data) {
+  # Convert binary variables to factors
+  data <- data %>%
+    mutate(across(all_of(binary_variables), as.factor)) 
+  
+  # Convert categorical variables to dummy variables (already set references in the previous step)
+  data <- convert_to_dummy_variables(data)
+  
+  return(data)
+}
+
+# Apply the data preparation function to each imputed dataset
+imputed_datasets <- lapply(imputed_datasets, prepare_data)
+
+# Example: Check if the conversion worked by looking at the first dataset
+str(imputed_datasets[[1]])
+
+# Function to run OLS regression on each imputed dataset with control variables
+run_regression <- function(data) {
+  model <- lm(SWB ~ AFTER_DEATH + ATTEND_SVCS + CONNECTED_REL + PRAY_MEDITATE + SACRED_TEXTS + REL_EXPERIENC + REL_IMPORTANT + BELIEVE_GOD + COMFORT_REL + CRITICAL + GOD_PUNISH + LIFE_APPROACH + LOVED_BY_GOD + REL2 + REL8 + TELL_BELIEFS + TEACHINGS + CAPABLE + PHYSICAL_HLTH + MENTAL_HEALTH + LIFE_PURPOSE + CONTENT + HOPE_FUTURE + FREEDOM + GRATEFUL + PEOPLE_HELP + BELONGING + CLOSE_TO,
+              data = data)
+  
+  # Print the summary of the model
+  print(summary(model))
+  
+  return(model)
+}
+
+# Apply the regression function to each imputed dataset and store the results
+regression_results <- lapply(imputed_datasets, run_regression)
+
+# Pool the regression results using Rubin's rules (for multiple imputed datasets)
+pooled_results <- pool(regression_results)
+
+# Summary of the pooled results
+summary(pooled_results)
+
+# Summarize the pooled results
+summary_pooled <- summary(pooled_results)
+
+# Convert the summary into a data frame
+summary_df <- as.data.frame(summary_pooled)
+
+# Sort the results by the absolute value of the estimate in descending order
+sorted_summary_df <- summary_df[order(abs(summary_df$estimate), decreasing = TRUE), ]
+
+# Print the sorted summary
+print(sorted_summary_df)
+
+# To check levels of dummy coded variables
+#levels(imputed_datasets[[1]]$CLOSE_TO)
+
+```
+
+```{r, Chunk 7, fig.cap="LASSO Regression"}
+
+# Function to handle dummy coding for all categorical variables with releveling
+convert_to_dummy_variables <- function(data) {
+  data <- data %>%
+    # Convert to unordered factor (using as.character first) and set reference categories
+    mutate(AFTER_DEATH = relevel(as.factor(as.character(AFTER_DEATH)), ref = "2")) %>%
+    mutate(ATTEND_SVCS = relevel(as.factor(as.character(ATTEND_SVCS)), ref = "1")) %>%
+    mutate(CONNECTED_REL = relevel(as.factor(as.character(CONNECTED_REL)), ref = "1")) %>%
+    mutate(PRAY_MEDITATE = relevel(as.factor(as.character(PRAY_MEDITATE)), ref = "1")) %>%
+    mutate(SACRED_TEXTS = relevel(as.factor(as.character(SACRED_TEXTS)), ref = "1")) %>%
+    mutate(SVCS_12YRS = relevel(as.factor(as.character(SVCS_12YRS)), ref = "1")) %>%
+    mutate(CAPABLE = relevel(as.factor(as.character(CAPABLE)), ref = "1")) %>%
+    mutate(CLOSE_TO = relevel(as.factor(as.character(CLOSE_TO)), ref = "2")) %>%
+    # Unordered categorical variables:
+    mutate(BELIEVE_GOD = relevel(as.factor(BELIEVE_GOD), ref = "4")) %>%
+    mutate(COMFORT_REL = relevel(as.factor(COMFORT_REL), ref = "2")) %>%
+    mutate(CRITICAL = relevel(as.factor(CRITICAL), ref = "2")) %>%
+    mutate(GOD_PUNISH = relevel(as.factor(GOD_PUNISH), ref = "2")) %>%
+    mutate(LIFE_APPROACH = relevel(as.factor(LIFE_APPROACH), ref = "2")) %>%
+    mutate(LOVED_BY_GOD = relevel(as.factor(LOVED_BY_GOD), ref = "2")) %>%
+    mutate(REL1 = relevel(as.factor(REL1), ref = "97")) %>%
+    mutate(REL2 = relevel(as.factor(REL2), ref = "97")) %>%
+    mutate(REL8 = relevel(as.factor(REL8), ref = "4")) %>%
+    mutate(TELL_BELIEFS = relevel(as.factor(TELL_BELIEFS), ref = "2"))
+  
+  return(data)
+}
+
+# Define the same model as used in run_regression function
+predictors_formula <- SWB ~ AFTER_DEATH + ATTEND_SVCS + CONNECTED_REL + PRAY_MEDITATE + SACRED_TEXTS +
+  REL_EXPERIENC + REL_IMPORTANT + BELIEVE_GOD + COMFORT_REL + CRITICAL + GOD_PUNISH + LIFE_APPROACH + 
+  LOVED_BY_GOD + REL2 + REL8 + TELL_BELIEFS + TEACHINGS + CAPABLE + PHYSICAL_HLTH + MENTAL_HEALTH + 
+  LIFE_PURPOSE + CONTENT + HOPE_FUTURE + FREEDOM + GRATEFUL + PEOPLE_HELP + BELONGING + CLOSE_TO
+
+# Function to prepare data with appropriate encoding for LASSO
+prepare_lasso_data <- function(data) {
+  # Convert binary and unordered categorical variables to factors (dummy coding)
+  data <- data %>%
+    mutate(across(all_of(binary_variables), as.factor),
+           across(all_of(unordered_variables), as.factor))
+  
+  # Convert ordered categorical variables to ordered factors
+  data <- data %>%
+    mutate(across(all_of(ordered_variables), ~ factor(., ordered = TRUE)))
+
+  # Apply polynomial contrasts to ordered factors
+  for (var in ordered_variables) {
+    contrasts(data[[var]]) <- contr.poly(nlevels(data[[var]]))
+  }
+
+  return(data)
+}
+
+# Apply the data preparation function to each imputed dataset
+imputed_datasets <- lapply(imputed_datasets, prepare_lasso_data)
+
+# Function to run LASSO regression on a single imputed dataset
+run_lasso <- function(data) {
+  # Remove rows with missing values in predictors or the response variable
+  complete_data <- data[complete.cases(data[, all.vars(predictors_formula)]), ]
+  
+  # Create model matrix for predictors (drop the intercept)
+  lasso_x <- model.matrix(predictors_formula, data = complete_data)[,-1]
+  
+  # Define the response variable
+  lasso_y <- complete_data$SWB
+  
+  # Ensure the number of rows match between predictors and response
+  if (nrow(lasso_x) != length(lasso_y)) {
+    stop("Error: Number of rows in predictors and response variable do not match.")
+  }
+  
+  # Run LASSO regression with cross-validation to find the optimal lambda
+  cv_fit <- cv.glmnet(lasso_x, lasso_y, alpha = 1)
+  
+  # Fit the final LASSO model using the optimal lambda
+  lasso_model <- glmnet(lasso_x, lasso_y, alpha = 1, lambda = cv_fit$lambda.min)
+  
+  # Extract coefficients
+  lasso_coefs <- coef(lasso_model)
+  
+  # Make predictions using the same dataset used for training
+  predictions <- predict(lasso_model, s = cv_fit$lambda.min, newx = lasso_x)
+  
+  return(list(model = lasso_model, coefficients = lasso_coefs, predictions = predictions, cv_fit = cv_fit, y_true = lasso_y))
+}
+
+# Apply the LASSO function to each imputed dataset
+lasso_results <- lapply(imputed_datasets, run_lasso)
+
+# Pooling LASSO Coefficients using Rubin's Rules
+coefs_matrix <- do.call(cbind, lapply(lasso_results, function(res) as.numeric(res$coefficients[-1])))
+
+# Calculate the pooled coefficient estimates (mean across imputations)
+pooled_coefs <- rowMeans(coefs_matrix)
+
+# Print the pooled LASSO coefficients
+cat("Pooled LASSO Coefficients:\n")
+print(pooled_coefs)
+
+# Calculate the pooled MSE and R-squared
+mse_list <- sapply(lasso_results, function(res) {
+  mean((res$y_true - res$predictions)^2)
+})
+
+pooled_mse <- mean(mse_list)
+cat("Pooled Mean Squared Error (MSE):", pooled_mse, "\n")
+
+r_squared_list <- sapply(lasso_results, function(res) {
+  1 - (sum((res$y_true - res$predictions)^2) / sum((res$y_true - mean(res$y_true))^2))
+})
+
+pooled_r_squared <- mean(r_squared_list)
+cat("Pooled R-squared:", pooled_r_squared, "\n")
+
+# Step 1: Extract the variable names from the model matrix
+lasso_x <- model.matrix(predictors_formula, data = imputed_datasets[[1]])[,-1]
+variable_names <- colnames(lasso_x)
+
+# Step 2: Combine the predictor names with the corresponding pooled coefficients
+lasso_results_df <- data.frame(Variable = variable_names, Coefficient = pooled_coefs)
+
+# Step 3: Print the results
+print(lasso_results_df)
+
+# Step 4: Sort the results based on the absolute value of the coefficients (optional)
+sorted_lasso_results_df <- lasso_results_df[order(abs(lasso_results_df$Coefficient), decreasing = TRUE), ]
+print(sorted_lasso_results_df)
+
+
+
+```
+
+```{r, Chunk 8, fig.cap="OLS Regression with Squared Terms"}
+
+# List of binary variables (no changes needed)
+binary_variables <- c("REL_EXPERIENC", "REL_IMPORTANT")
+
+# List of unordered categorical variables (no squared terms, consider interactions)
+unordered_variables <- c("BELIEVE_GOD", "COMFORT_REL", "CRITICAL", 
+                         "GOD_PUNISH", "LIFE_APPROACH", "LOVED_BY_GOD", 
+                         "REL1", "REL2", "REL8", "TELL_BELIEFS")
+
+# List of ordered categorical variables (apply polynomial contrasts)
+ordered_variables <- c("AFTER_DEATH", "ATTEND_SVCS", "CONNECTED_REL", 
+                       "PRAY_MEDITATE", "SACRED_TEXTS", "SVCS_12YRS", 
+                       "CAPABLE", "CLOSE_TO")
+
+# Function to handle ordered categorical variables using polynomial contrasts
+convert_to_ordered_factors <- function(data) {
+  data <- data %>%
+    mutate(across(all_of(ordered_variables), ~ factor(., ordered = TRUE)))
+  
+  # Apply polynomial contrasts for ordered factors
+  for (var in ordered_variables) {
+    contrasts(data[[var]]) <- contr.poly(nlevels(data[[var]]))
+  }
+  
+  return(data)
+}
+
+# Function to apply best practices for categorical variables (including interactions)
+prepare_data <- function(data) {
+  # Convert unordered categorical variables to factors (dummy coding)
+  data <- data %>%
+    mutate(across(all_of(unordered_variables), as.factor))
+  
+  # Convert ordered categorical variables to ordered factors with polynomial contrasts
+  data <- convert_to_ordered_factors(data)
+  
+  # Create interaction terms between important unordered categorical variables
+  data <- data %>%
+    mutate(REL_EXPERIENC_BELIEVE_GOD = interaction(REL_EXPERIENC, BELIEVE_GOD),
+           COMFORT_REL_CRITICAL = interaction(COMFORT_REL, CRITICAL))
+  
+  return(data)
+}
+
+# Apply the data preparation function to each imputed dataset
+imputed_datasets <- lapply(imputed_datasets, prepare_data)
+
+# Example: Check if the conversion and interaction terms worked by looking at the first dataset
+str(imputed_datasets[[1]])
+
+# Function to run OLS regression on each imputed dataset with interaction terms and polynomial contrasts
+run_regression <- function(data) {
+  lm(SWB ~ REL_EXPERIENC + REL_IMPORTANT + BELIEVE_GOD + COMFORT_REL + CRITICAL + 
+       GOD_PUNISH + LIFE_APPROACH + LOVED_BY_GOD + REL2 + REL8 + 
+       TELL_BELIEFS + AFTER_DEATH + ATTEND_SVCS + CONNECTED_REL + PRAY_MEDITATE + 
+       SACRED_TEXTS + SVCS_12YRS + TEACHINGS + CAPABLE + PHYSICAL_HLTH + 
+       MENTAL_HEALTH + LIFE_PURPOSE + CONTENT + HOPE_FUTURE + FREEDOM + 
+       GRATEFUL + PEOPLE_HELP + BELONGING + CLOSE_TO,  
+     data = data)
+}
+
+# Apply the regression function to each imputed dataset and store the results
+regression_results <- lapply(imputed_datasets, run_regression)
+
+# Pool the regression results using Rubin's rules (for multiple imputed datasets)
+pooled_results <- pool(regression_results)
+
+# Summary of the pooled results
+summary(pooled_results)
+
+# Summarize the pooled results
+summary_pooled <- summary(pooled_results)
+
+# Convert the summary into a data frame
+summary_df <- as.data.frame(summary_pooled)
+
+# Sort the results by the absolute value of the estimate in descending order
+sorted_summary_df <- summary_df[order(abs(summary_df$estimate), decreasing = TRUE), ]
+
+# Print the sorted summary
+print(sorted_summary_df)
+
+# Check the contrasts for a variable
+# contrasts(imputed_datasets[[1]]$AFTER_DEATH)  
+
+
+```
+
+```{r, Chunk 9, fig.cap="OLS Regression with Product Terms"}
+
+# Function to handle dummy coding and releveling for categorical variables
+convert_to_dummy_variables <- function(data) {
+  data <- data %>%
+    # Convert to unordered factor (using as.character first) and set reference categories
+    mutate(AFTER_DEATH = relevel(as.factor(as.character(AFTER_DEATH)), ref = "2")) %>%
+    mutate(ATTEND_SVCS = relevel(as.factor(as.character(ATTEND_SVCS)), ref = "1")) %>%
+    mutate(CONNECTED_REL = relevel(as.factor(as.character(CONNECTED_REL)), ref = "1")) %>%
+    mutate(PRAY_MEDITATE = relevel(as.factor(as.character(PRAY_MEDITATE)), ref = "1")) %>%
+    mutate(SACRED_TEXTS = relevel(as.factor(as.character(SACRED_TEXTS)), ref = "1")) %>%
+    mutate(CAPABLE = relevel(as.factor(as.character(CAPABLE)), ref = "1")) %>%
+    mutate(CLOSE_TO = relevel(as.factor(as.character(CLOSE_TO)), ref = "2")) %>%
+    # Unordered categorical variables:
+    mutate(BELIEVE_GOD = relevel(as.factor(BELIEVE_GOD), ref = "4")) %>%
+    mutate(COMFORT_REL = relevel(as.factor(COMFORT_REL), ref = "2")) %>%
+    mutate(CRITICAL = relevel(as.factor(CRITICAL), ref = "2")) %>%
+    mutate(GOD_PUNISH = relevel(as.factor(GOD_PUNISH), ref = "2")) %>%
+    mutate(LIFE_APPROACH = relevel(as.factor(LIFE_APPROACH), ref = "2")) %>%
+    mutate(LOVED_BY_GOD = relevel(as.factor(LOVED_BY_GOD), ref = "2")) %>%
+    mutate(REL2 = relevel(as.factor(REL2), ref = "97")) %>%
+    mutate(REL8 = relevel(as.factor(REL8), ref = "4")) %>%
+    mutate(TELL_BELIEFS = relevel(as.factor(TELL_BELIEFS), ref = "2"))
+  
+  return(data)
+}
+
+# Function to prepare the data (including dummy coding for unordered variables)
+prepare_data <- function(data) {
+  # Convert binary variables to factors
+  data <- data %>%
+    mutate(across(all_of(binary_variables), as.factor))
+  
+  # Apply dummy coding and releveling to categorical variables
+  data <- convert_to_dummy_variables(data)
+  
+  return(data)
+}
+
+# Apply the data preparation function to each imputed dataset
+imputed_datasets <- lapply(imputed_datasets, prepare_data)
+
+# Function to perform forward stepwise regression on a single imputed dataset
+run_forward_stepwise <- function(data) {
+  # Define the predictor variables (excluding REL1 and SVCS_12YRS as per your request)
+  predictors <- c("AFTER_DEATH", "ATTEND_SVCS", "BELIEVE_GOD", "CLOSE_TO", "COMFORT_REL", 
+                  "CONNECTED_REL", "CRITICAL", "GOD_PUNISH", "LIFE_APPROACH", 
+                  "LOVED_BY_GOD", "PRAY_MEDITATE", "REL2", "REL8", 
+                  "REL_EXPERIENC", "REL_IMPORTANT", "SACRED_TEXTS", 
+                  "TEACHINGS", "TELL_BELIEFS", "ABRAHAMIC", "WEIRD")
+  
+  # Filter out rows with missing values in both predictors and response variable
+  complete_data <- data[complete.cases(data[, c(predictors, "SWB")]), ]
+  
+  # Start with the null model
+  null_model <- lm(SWB ~ 1, data = complete_data)
+  
+  # Define the full model with all main effects and selected interaction terms
+  full_model <- lm(SWB ~ AFTER_DEATH + ATTEND_SVCS + BELIEVE_GOD + CLOSE_TO + COMFORT_REL + 
+                     CONNECTED_REL + CRITICAL + GOD_PUNISH + LIFE_APPROACH + LOVED_BY_GOD + 
+                     PRAY_MEDITATE + REL2 + REL8 + REL_EXPERIENC + REL_IMPORTANT + 
+                     SACRED_TEXTS + TEACHINGS + TELL_BELIEFS + ABRAHAMIC + WEIRD +
+                     # Add interaction terms
+                     AFTER_DEATH:ATTEND_SVCS + AFTER_DEATH:PRAY_MEDITATE + 
+                     AFTER_DEATH:SACRED_TEXTS + BELIEVE_GOD:ATTEND_SVCS + 
+                     BELIEVE_GOD:PRAY_MEDITATE + BELIEVE_GOD:SACRED_TEXTS + 
+                     CLOSE_TO:ATTEND_SVCS + CLOSE_TO:PRAY_MEDITATE + 
+                     CLOSE_TO:SACRED_TEXTS + REL8:ATTEND_SVCS + 
+                     REL8:PRAY_MEDITATE + REL8:SACRED_TEXTS +
+                     # Interaction terms with ABRAHAMIC
+                     ATTEND_SVCS:ABRAHAMIC + PRAY_MEDITATE:ABRAHAMIC + SACRED_TEXTS:ABRAHAMIC +
+                     # Interaction terms with WEIRD
+                     ATTEND_SVCS:WEIRD + PRAY_MEDITATE:WEIRD + SACRED_TEXTS:WEIRD, 
+                     data = complete_data)
+  
+  # Perform forward stepwise regression using AIC as the criterion
+  stepwise_model <- stepAIC(null_model, scope = list(lower = null_model, upper = full_model), 
+                            direction = "forward", trace = FALSE)
+  
+  return(stepwise_model)
+}
+
+# Apply the stepwise function to each imputed dataset
+stepwise_models <- lapply(imputed_datasets, run_forward_stepwise)
+
+# Pool the results using Rubin's rules
+pooled_results <- pool(stepwise_models)
+
+# Summary of the pooled results
+summary(pooled_results)
+
+
+
+```
+
+```{r, Chunk 10, fig.cap="Exploratory Longitudinal Analysis"}
+
+# Create a binary variable for change in religious affiliation
+imputed_datasets <- lapply(imputed_datasets, function(data) {
+  data <- data %>%
+    mutate(REL_CHANGE = ifelse(REL1 != REL2, 1, 0))
+  return(data)
+})
+
+# Function to run OLS regression and sort by effect size
+run_regression_with_change_and_sort <- function(data) {
+  model <- lm(SWB ~ REL_CHANGE + REL_EXPERIENC + REL_IMPORTANT + BELIEVE_GOD + 
+                COMFORT_REL + CRITICAL + GOD_PUNISH + LIFE_APPROACH + 
+                LOVED_BY_GOD + REL1 + REL2 + TELL_BELIEFS + TEACHINGS + 
+                CAPABLE + PHYSICAL_HLTH + MENTAL_HEALTH + LIFE_PURPOSE + 
+                CONTENT + HOPE_FUTURE + FREEDOM + GRATEFUL + 
+                PEOPLE_HELP + BELONGING + CLOSE_TO, 
+              data = data)
+  
+  # Extract the summary of the model
+  model_summary <- summary(model)
+  
+  # Create a data frame with coefficients, standard errors, and p-values
+  coef_df <- as.data.frame(model_summary$coefficients)
+  
+  # Add a column for absolute values of the estimates (effect size)
+  coef_df$abs_estimate <- abs(coef_df$Estimate)
+  
+  # Sort the coefficients by absolute estimate (effect size) in descending order
+  sorted_coef_df <- coef_df[order(-coef_df$abs_estimate), ]
+  
+  # Print the sorted coefficients
+  print(sorted_coef_df)
+  
+  return(model)
+}
+
+# Apply the regression function to each imputed dataset
+regression_results_sorted <- lapply(imputed_datasets, run_regression_with_change_and_sort)
+
+# Pool the regression results using Rubin's rules (for multiple imputed datasets)
+pooled_results_sorted <- pool(regression_results_sorted)
+
+# Summary of the pooled results (sorted by effect size)
+summary(pooled_results_sorted)
+
+```
+
