@@ -194,25 +194,16 @@ traits_variables <- paste0("TRAITS", 1:10)
 # Values to exclude from reverse scoring
 excluded_values <- c(-98, -998, -9998, 9995, 95, 96, 97, 98, 998, 9998, 99, 999, 9999, NA)
 
-# Function to reverse the scale from 1-4 to 4-1
-reverse_scale_1_4 <- function(x) {
-  return(ifelse(x %in% excluded_values, x, 5 - x))
+# Function to reverse scales
+reverse_scale <- function(x, max_value) {
+  return(ifelse(x %in% excluded_values, x, (max_value + 1) - x))
 }
 
-# Function to reverse the scale from 1-5 to 5-1
-reverse_scale_1_5 <- function(x) {
-  return(ifelse(x %in% excluded_values, x, 6 - x))
-}
-
-# Function to reverse the scale from 1-7 to 7-1
-reverse_scale_1_7 <- function(x) {
-  return(ifelse(x %in% excluded_values, x, 8 - x))
-}
-
-# Function to reverse the scale from 0-10 to 10-0
-reverse_scale_0_10 <- function(x) {
-  return(ifelse(x %in% excluded_values, x, 10 - x))
-}
+# Apply the custom function to reverse specific scales
+data_cleaned[variables_to_reverse_1_4] <- lapply(data_cleaned[variables_to_reverse_1_4], reverse_scale, max_value = 4)
+data_cleaned[variables_to_reverse_1_5] <- lapply(data_cleaned[variables_to_reverse_1_5], reverse_scale, max_value = 5)
+data_cleaned[variables_to_reverse_0_10] <- lapply(data_cleaned[variables_to_reverse_0_10], reverse_scale, max_value = 10)
+data_cleaned[traits_variables] <- lapply(data_cleaned[traits_variables], reverse_scale, max_value = 7)
 
 # Apply reverse scoring to the specified variables
 data_cleaned[variables_to_reverse_1_4] <- lapply(data_cleaned[variables_to_reverse_1_4], reverse_scale_1_4)
