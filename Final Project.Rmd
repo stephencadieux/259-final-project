@@ -368,17 +368,9 @@ for (i in 1:mice_imputed$m) {
 
 ```{r, Chunk 4, fig.cap="Data Cleaning"}
 
-# Read in imputed data sets
-imputed_dataset_1 <- read.csv('../data/imputed_dataset_1.csv')
-imputed_dataset_2 <- read.csv('../data/imputed_dataset_2.csv')
-imputed_dataset_3 <- read.csv('../data/imputed_dataset_3.csv')
-imputed_dataset_4 <- read.csv('../data/imputed_dataset_4.csv')
-imputed_dataset_5 <- read.csv('../data/imputed_dataset_5.csv')
-imputed_dataset_6 <- read.csv('../data/imputed_dataset_6.csv')
-imputed_dataset_7 <- read.csv('../data/imputed_dataset_7.csv')
-imputed_dataset_8 <- read.csv('../data/imputed_dataset_8.csv')
-imputed_dataset_9 <- read.csv('../data/imputed_dataset_9.csv')
-imputed_dataset_10 <- read.csv('../data/imputed_dataset_10.csv')
+# Generate file paths dynamically and read in all imputed datasets
+file_paths <- sprintf("../data/imputed_dataset_%d.csv", 1:10)
+imputed_datasets <- lapply(file_paths, read.csv)
 
 # List of imputed datasets
 imputed_datasets <- list(imputed_dataset_1, imputed_dataset_2, imputed_dataset_3, 
